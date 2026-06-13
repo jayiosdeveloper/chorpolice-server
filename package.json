@@ -1,0 +1,16 @@
+{
+  "name": "chorpolice-server",
+  "version": "1.0.0",
+  "description": "Chor Police online relay server — rooms (public/private) + message relay over WebSocket. Cross-platform (iOS + Android speak the same JSON).",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
