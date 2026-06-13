@@ -32,14 +32,21 @@
 
 const http = require('http');
 const { WebSocketServer } = require('ws');
+const { makeStore } = require('./store');
 
 const PORT = process.env.PORT || 8080;
 const MAX_CAP = 20;          // hard ceiling for any room (public requirement)
 const CODE_LEN = 5;          // shareable room code length
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no confusing 0/O/1/I
+const PAGE = 20;             // online-players page size
 
 /** @type {Map<string, Room>} code -> room */
 const rooms = new Map();
+
+// social: presence + persistent friends
+const store = makeStore();
+/** @type {Map<string, WebSocket>} pid -> connection (online players) */
+const online = new Map();
 
 // ---- tiny helpers -------------------------------------------------------
 
@@ -162,6 +169,8 @@ function handle(ws, msg) {
   switch (msg.t) {
     case 'hello':
       ws.identity = { name: String(msg.name || 'Player').slice(0, 24), skin: msg.skin || {} };
+      ws.pid = msg.pid ? String(msg.pid).slice(0, 48) : null;
+      if (ws.pid) registerPresence(ws);
       send(ws, { t: 'welcome' });
       break;
 
@@ -220,7 +229,110 @@ function handle(ws, msg) {
       room.broadcast({ t: 'm', from: ws.playerId, d: msg.d }, ws);  // relay to OTHERS
       break;
     }
+
+    // social (presence + friends)
+    case 'players':        sendPlayers(ws, msg);   break;
+    case 'friend_req':     friendReq(ws, msg);     break;
+    case 'friend_accept':  friendAccept(ws, msg);  break;
+    case 'friend_decline': friendDecline(ws, msg); break;
+    case 'unfriend':       unfriend(ws, msg);      break;
+    case 'friends':        sendFriends(ws);        break;
+    case 'requests':       sendRequests(ws);       break;
+    case 'profile':        sendProfile(ws, msg);   break;
   }
+}
+
+// ---- social: presence + friends -----------------------------------------
+
+function registerPresence(ws) {
+  const old = online.get(ws.pid);
+  if (old && old !== ws) { try { old.close(); } catch {} }   // a pid reconnected
+  online.set(ws.pid, ws);
+  store.saveProfile(ws.pid, { name: ws.identity.name, skin: ws.identity.skin });
+  broadcastPresence();
+  sendRequests(ws);             // deliver any pending friend requests
+}
+
+function broadcastPresence() {
+  const count = online.size;
+  for (const ws of wss.clients) send(ws, { t: 'presence', count });
+}
+
+function profileItem(pid, prof) {
+  return { pid, name: (prof && prof.name) || 'Player', skin: (prof && prof.skin) || {}, online: online.has(pid) };
+}
+
+async function sendPlayers(ws, msg) {
+  const page = Math.max(0, parseInt(msg.page, 10) || 0);
+  const me = ws.pid;
+  const friendSet = new Set(me ? await store.getFriends(me) : []);
+  const items = [];
+  for (const [pid, w] of online) {
+    if (pid === me) continue;
+    items.push({ pid, name: w.identity.name, skin: w.identity.skin, online: true, friend: friendSet.has(pid) });
+  }
+  items.sort((a, b) => a.name.localeCompare(b.name));
+  const total = items.length;
+  const pages = Math.max(1, Math.ceil(total / PAGE));
+  send(ws, { t: 'players', page, pages, total, items: items.slice(page * PAGE, page * PAGE + PAGE) });
+}
+
+async function friendReq(ws, msg) {
+  const me = ws.pid, to = String(msg.to || '');
+  if (!me || !to || to === me) return;
+  if (await store.isFriend(me, to)) return;
+  await store.addRequest(to, me);
+  const w = online.get(to);
+  if (w) send(w, { t: 'friend_req', from: profileItem(me, ws.identity) });
+  send(ws, { t: 'ok', what: 'friend_req' });
+}
+
+async function friendAccept(ws, msg) {
+  const me = ws.pid, from = String(msg.from || '');
+  if (!me || !from) return;
+  const reqs = await store.getRequests(me);
+  if (!reqs.includes(from)) return;
+  await store.removeRequest(me, from);
+  await store.addFriend(me, from);
+  sendFriends(ws);
+  const w = online.get(from);
+  if (w) { send(w, { t: 'friend_ok', with: profileItem(me, ws.identity) }); sendFriends(w); }
+}
+
+async function friendDecline(ws, msg) {
+  const me = ws.pid, from = String(msg.from || '');
+  if (me && from) { await store.removeRequest(me, from); sendRequests(ws); }
+}
+
+async function unfriend(ws, msg) {
+  const me = ws.pid, pid = String(msg.pid || '');
+  if (me && pid) { await store.removeFriend(me, pid); sendFriends(ws); }
+}
+
+async function sendFriends(ws) {
+  if (!ws.pid) { send(ws, { t: 'friends', items: [] }); return; }
+  const ids = await store.getFriends(ws.pid);
+  const items = [];
+  for (const pid of ids) items.push(profileItem(pid, await store.getProfile(pid)));
+  items.sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
+  send(ws, { t: 'friends', items });
+}
+
+async function sendRequests(ws) {
+  if (!ws.pid) { send(ws, { t: 'requests', items: [] }); return; }
+  const ids = await store.getRequests(ws.pid);
+  const items = [];
+  for (const pid of ids) items.push(profileItem(pid, await store.getProfile(pid)));
+  send(ws, { t: 'requests', items });
+}
+
+async function sendProfile(ws, msg) {
+  const pid = String(msg.pid || '');
+  if (!pid) return;
+  const prof = await store.getProfile(pid);
+  const friends = await store.getFriends(pid);
+  send(ws, { t: 'profile', pid, name: (prof && prof.name) || 'Player',
+             skin: (prof && prof.skin) || {}, online: online.has(pid), friends: friends.length });
 }
 
 // ---- server + heartbeat -------------------------------------------------
@@ -236,6 +348,7 @@ wss.on('connection', (ws) => {
   ws.identity = { name: 'Player', skin: {} };
   ws.room = null;
   ws.playerId = 0;
+  ws.pid = null;
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
 
@@ -245,7 +358,10 @@ wss.on('connection', (ws) => {
     if (msg && typeof msg === 'object' && typeof msg.t === 'string') handle(ws, msg);
   });
 
-  ws.on('close', () => leaveRoom(ws));
+  ws.on('close', () => {
+    leaveRoom(ws);
+    if (ws.pid && online.get(ws.pid) === ws) { online.delete(ws.pid); broadcastPresence(); }
+  });
   ws.on('error', () => {});
 });
 
