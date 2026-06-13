@@ -2,6 +2,7 @@ services:
   - type: web
     name: chorpolice-relay
     runtime: node
+    region: singapore
     plan: free
     buildCommand: npm install
     startCommand: node server.js
