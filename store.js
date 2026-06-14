@@ -23,7 +23,8 @@ function makeStore() {
 }
 
 class MemoryStore {
-  constructor() { this.persistent = false; this.kv = new Map(); this.sets = new Map(); }
+  constructor() { this.persistent = false; this.kind = 'memory'; this.kv = new Map(); this.sets = new Map(); }
+  async ping() { return { ok: true, detail: 'in-memory (not persistent)' }; }
   _set(k) { if (!this.sets.has(k)) this.sets.set(k, new Set()); return this.sets.get(k); }
   async saveProfile(pid, prof) { this.kv.set('profile:' + pid, JSON.stringify(prof)); }
   async getProfile(pid) { const v = this.kv.get('profile:' + pid); return v ? JSON.parse(v) : null; }
@@ -37,7 +38,7 @@ class MemoryStore {
 }
 
 class UpstashStore {
-  constructor() { this.persistent = true; }
+  constructor() { this.persistent = true; this.kind = 'upstash'; }
   async _cmd(arr) {
     try {
       const res = await fetch(URL, {
@@ -46,10 +47,27 @@ class UpstashStore {
         body: JSON.stringify(arr),
       });
       const j = await res.json();
+      if (j.error) { console.error('[store] upstash', arr[0], 'error:', j.error); return null; }
       return j.result;
     } catch (e) {
-      console.error('[store] upstash error', e && e.message);
+      console.error('[store] upstash fetch error', e && e.message);
       return null;
+    }
+  }
+  async ping() {
+    try {
+      const res = await fetch(URL, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + TOKEN, 'Content-Type': 'application/json' },
+        body: JSON.stringify(['SET', 'health:ping', 'ok']),
+      });
+      const j = await res.json();
+      if (j.error) return { ok: false, detail: 'auth/url error: ' + j.error + ' (HTTP ' + res.status + ')' };
+      const v = await this._cmd(['GET', 'health:ping']);
+      return v === 'ok' ? { ok: true, detail: 'connected' }
+                        : { ok: false, detail: 'unexpected result: ' + JSON.stringify(v) };
+    } catch (e) {
+      return { ok: false, detail: 'fetch failed: ' + (e && e.message) + ' (check UPSTASH_REDIS_REST_URL)' };
     }
   }
   async saveProfile(pid, prof) { await this._cmd(['SET', 'profile:' + pid, JSON.stringify(prof)]); }

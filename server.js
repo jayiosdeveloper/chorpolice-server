@@ -337,9 +337,14 @@ async function sendProfile(ws, msg) {
 
 // ---- server + heartbeat -------------------------------------------------
 
-const httpServer = http.createServer((req, res) => {
+const httpServer = http.createServer(async (req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Chor Police relay OK. rooms=' + rooms.size);
+  if (req.url && req.url.startsWith('/health')) {
+    const p = await store.ping();
+    res.end(`store=${store.kind}  ok=${p.ok}  ${p.detail}\nrooms=${rooms.size}  online=${online.size}`);
+  } else {
+    res.end('Chor Police relay OK. rooms=' + rooms.size + ' store=' + store.kind);
+  }
 });
 
 const wss = new WebSocketServer({ server: httpServer });
