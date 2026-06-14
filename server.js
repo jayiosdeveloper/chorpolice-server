@@ -32,7 +32,7 @@
 
 const http = require('http');
 const { WebSocketServer } = require('ws');
-const { makeStore } = require('./store');
+const { makeStore, makeMemoryStore } = require('./store');
 
 const PORT = process.env.PORT || 8080;
 const MAX_CAP = 20;          // hard ceiling for any room (public requirement)
@@ -44,7 +44,8 @@ const PAGE = 20;             // online-players page size
 const rooms = new Map();
 
 // social: presence + persistent friends
-const store = makeStore();
+let store = makeStore();
+let storeNote = '';
 /** @type {Map<string, WebSocket>} pid -> connection (online players) */
 const online = new Map();
 
@@ -341,7 +342,7 @@ const httpServer = http.createServer(async (req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   if (req.url && req.url.startsWith('/health')) {
     const p = await store.ping();
-    res.end(`store=${store.kind}  ok=${p.ok}  ${p.detail}\nrooms=${rooms.size}  online=${online.size}`);
+    res.end(`store=${store.kind}  ok=${p.ok}  ${p.detail}\n${storeNote}\nrooms=${rooms.size}  online=${online.size}`);
   } else {
     res.end('Chor Police relay OK. rooms=' + rooms.size + ' store=' + store.kind);
   }
@@ -380,6 +381,16 @@ const beat = setInterval(() => {
 }, 30000);
 wss.on('close', () => clearInterval(beat));
 
-httpServer.listen(PORT, () => {
+httpServer.listen(PORT, async () => {
   console.log('Chor Police relay listening on :' + PORT);
+  if (store.kind === 'upstash') {
+    const p = await store.ping();
+    if (!p.ok) {
+      storeNote = 'Upstash unusable (' + p.detail + ') — using in-memory. Set the READ-WRITE UPSTASH_REDIS_REST_TOKEN for permanent friends.';
+      console.error('[store] ' + storeNote);
+      store = makeMemoryStore();        // friends still work, just not persisted
+    } else {
+      console.log('[store] Upstash OK — friends are persistent');
+    }
+  }
 });

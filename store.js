@@ -81,4 +81,4 @@ class UpstashStore {
   async isFriend(a, b) { return (await this._cmd(['SISMEMBER', 'friends:' + a, b])) === 1; }
 }
 
-module.exports = { makeStore };
+module.exports = { makeStore, makeMemoryStore: () => new MemoryStore() };
